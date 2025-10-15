@@ -130,4 +130,4 @@ Ce projet est sous licence MIT.
 
 ## 👥 Contributeurs
 
-- Votre nom (@votre-username)
+- Votre nom (@JuniorSEVERE-WEB)
