@@ -24,8 +24,24 @@ from django.conf.urls.static import static
 def healthcheck(_):
     return JsonResponse({"status": "ok", "service": "nextpost-api"})
 
+def api_root(_):
+    return JsonResponse({
+        "service": "NextPost API",
+        "version": "1.0.0",
+        "endpoints": {
+            "health": "/api/health/",
+            "docs": "/api/docs/",
+            "schema": "/api/schema/",
+            "users": "/api/users/",
+            "scheduler": "/api/scheduler/", 
+            "media": "/api/media/",
+            "admin": "/admin/"
+        }
+    })
+
 urlpatterns = [
     path("admin/", admin.site.urls),
+    path("api/", api_root, name="api-root"),
     path("api/health/", healthcheck, name="healthcheck"),
 
     # users
