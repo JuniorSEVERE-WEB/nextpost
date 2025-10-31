@@ -24,10 +24,12 @@ INSTALLED_APPS = [
     "drf_spectacular",
     "django_celery_beat",
     "django_celery_results",
+    "django_filters",
 
     # local apps
     "users",
     "scheduler",
+    "media",
 ]
 
 MIDDLEWARE = [
