@@ -8,9 +8,11 @@ from datetime import datetime
 from celery import shared_task
 from django.core.exceptions import ValidationError
 from django.db import transaction
+from django.utils import timezone
 
 from .models import Post, SocialAccount, PostMediaAsset
 from media.models import MediaAsset
+from .integrations.publisher import UniversalPublisher, PublicationError
 
 logger = logging.getLogger(__name__)
 
@@ -22,101 +24,62 @@ def ping(self, payload: dict | None = None):
     time.sleep(1)
     return {"ok": True, "echo": payload or {}}
 
-@shared_task(bind=True, autoretry_for=(Exception,), retry_backoff=True, retry_kwargs={"max_retries": 3})
+@shared_task(bind=True, autoretry_for=(PublicationError,), retry_backoff=True, retry_kwargs={"max_retries": 3})
 def publish_post(self, post_id: int, force_publish: bool = False) -> Dict[str, Any]:
     """
-    Enhanced post publishing task with platform validation and media asset handling.
+    Enhanced post publishing task using the UniversalPublisher service.
     """
     try:
-        with transaction.atomic():
-            # Get post with related data
-            post = Post.objects.select_related('user', 'social_account').prefetch_related(
-                'media_assets__asset'
-            ).get(id=post_id)
-            
-            # Validate post is ready for publishing
-            if not force_publish and post.status != Post.PostStatus.SCHEDULED:
-                logger.warning(f"Post {post_id} is not scheduled for publishing (status: {post.status})")
-                return {"status": "skipped", "reason": "not_scheduled", "post_id": post_id}
-            
-            # Check if social account is active and valid
-            if not post.social_account or not post.social_account.is_active:
-                raise ValidationError("Social account is not active or missing")
-            
-            # Update status to publishing
-            post.status = Post.PostStatus.PUBLISHING
-            post.save(update_fields=['status', 'updated_at'])
-            
-            logger.info(f"Starting publication of post {post_id} to {post.social_account.platform}")
-            
-            # Platform-specific validation
-            validation_errors = post.validate_for_platform()
-            if validation_errors:
-                post.status = Post.PostStatus.FAILED
-                post.error_message = f"Validation errors: {', '.join(validation_errors)}"
-                post.save(update_fields=['status', 'error_message', 'updated_at'])
-                raise ValidationError(f"Post validation failed: {validation_errors}")
-            
-            # Prepare media assets for publication
-            media_files = []
-            for post_asset in post.postmediaasset_set.all().order_by('order'):
-                asset = post_asset.asset
-                media_files.append({
-                    'type': asset.file_type,
-                    'path': asset.file.path,
-                    'url': asset.file.url,
-                    'thumbnail_url': asset.thumbnail.url if asset.thumbnail else None,
-                    'metadata': asset.metadata
-                })
-            
-            # Platform-specific publishing logic
-            result = _publish_to_platform(post, media_files)
-            
-            if result['success']:
-                # Update post with success status
-                post.status = Post.PostStatus.PUBLISHED
-                post.published_at = datetime.now()
-                post.platform_post_id = result.get('platform_post_id')
-                post.error_message = None
-                post.save(update_fields=['status', 'published_at', 'platform_post_id', 'error_message', 'updated_at'])
-                
-                # Update social account usage stats
-                post.social_account.posts_count += 1
-                post.social_account.last_used_at = datetime.now()
-                post.social_account.save(update_fields=['posts_count', 'last_used_at'])
-                
-                logger.info(f"Successfully published post {post_id}")
-                return {
-                    "status": "published",
-                    "post_id": post_id,
-                    "platform_post_id": result.get('platform_post_id'),
-                    "published_at": post.published_at.isoformat()
-                }
-            else:
-                # Handle publishing failure
-                post.status = Post.PostStatus.FAILED
-                post.error_message = result.get('error', 'Unknown publishing error')
-                post.save(update_fields=['status', 'error_message', 'updated_at'])
-                
-                logger.error(f"Failed to publish post {post_id}: {result.get('error')}")
-                return {
-                    "status": "failed",
-                    "post_id": post_id,
-                    "error": result.get('error')
-                }
+        post = Post.objects.select_related('user', 'social_account').get(id=post_id)
+        
+        # Validate post is ready for publishing
+        if not force_publish and post.status != Post.PostStatus.SCHEDULED:
+            logger.warning(f"Post {post_id} is not scheduled for publishing (status: {post.status})")
+            return {"status": "skipped", "reason": "not_scheduled", "post_id": post_id}
+        
+        # Check if it's time to publish (with some tolerance)
+        if not force_publish and post.scheduled_at and post.scheduled_at > timezone.now():
+            logger.info(f"Post {post_id} not ready yet, scheduled for {post.scheduled_at}")
+            return {"status": "deferred", "scheduled_at": post.scheduled_at.isoformat(), "post_id": post_id}
+        
+        logger.info(f"Starting publication of post {post_id} to {post.social_account.platform}")
+        
+        # Use the UniversalPublisher service
+        publisher = UniversalPublisher()
+        result = publisher.publish_post(post, force=force_publish)
+        
+        logger.info(f"Successfully published post {post_id}: {result['message']}")
+        return {
+            "status": "published",
+            "post_id": post_id,
+            "platform_post_id": result.get('platform_post_id'),
+            "published_url": result.get('published_url'),
+            "published_at": result.get('published_at'),
+            "message": result['message']
+        }
                 
     except Post.DoesNotExist:
         logger.error(f"Post {post_id} not found")
         return {"status": "error", "error": "Post not found", "post_id": post_id}
     
+    except PublicationError as e:
+        logger.error(f"Publication error for post {post_id}: {str(e)}")
+        return {
+            "status": "failed",
+            "post_id": post_id,
+            "error": str(e),
+            "platform": e.platform,
+            "error_code": e.error_code
+        }
+    
     except Exception as e:
-        logger.error(f"Error publishing post {post_id}: {str(e)}\n{traceback.format_exc()}")
+        logger.error(f"Unexpected error publishing post {post_id}: {str(e)}\n{traceback.format_exc()}")
         
         # Update post status to failed if it exists
         try:
             post = Post.objects.get(id=post_id)
             post.status = Post.PostStatus.FAILED
-            post.error_message = f"Publishing error: {str(e)}"
+            post.error_message = f"Unexpected error: {str(e)}"[:1000]
             post.save(update_fields=['status', 'error_message', 'updated_at'])
         except Post.DoesNotExist:
             pass
@@ -124,40 +87,60 @@ def publish_post(self, post_id: int, force_publish: bool = False) -> Dict[str, A
         # Re-raise for Celery retry mechanism
         raise self.retry(countdown=60 * (self.request.retries + 1))
 
-def _publish_to_platform(post: Post, media_files: List[Dict[str, Any]]) -> Dict[str, Any]:
+@shared_task(bind=True)
+def publish_post_now(self, post_id: int) -> Dict[str, Any]:
     """
-    Platform-specific publishing logic. This is a placeholder that would be
-    replaced with actual API calls to each platform.
+    Publish a post immediately, bypassing the scheduling.
     """
-    platform = post.social_account.platform
-    
-    # Simulate platform-specific publishing
-    logger.info(f"Publishing to {platform} with {len(media_files)} media files")
-    
-    # Platform-specific logic would go here
-    # For now, simulate success/failure
+    return publish_post(post_id, force_publish=True)
+
+@shared_task(bind=True)
+def test_social_account_connection(self, social_account_id: int) -> Dict[str, Any]:
+    """
+    Test the connection of a social account to validate credentials.
+    """
     try:
-        if platform == 'instagram_story' and not media_files:
-            return {"success": False, "error": "Instagram Stories require at least one media file"}
+        social_account = SocialAccount.objects.get(id=social_account_id)
+        publisher = UniversalPublisher()
         
-        if platform in ['facebook_page', 'facebook_group'] and len(post.content) > 63206:
-            return {"success": False, "error": "Facebook posts cannot exceed 63,206 characters"}
+        result = publisher.test_social_account_connection(social_account)
         
-        if platform == 'twitter' and len(post.content) > 280:
-            return {"success": False, "error": "Twitter posts cannot exceed 280 characters"}
+        if result['success']:
+            # Update account status
+            social_account.is_active = True
+            social_account.last_validated_at = timezone.now()
+            social_account.error_message = None
+            social_account.save(update_fields=['is_active', 'last_validated_at', 'error_message'])
+            
+            logger.info(f"Social account {social_account_id} validated successfully")
+            return {
+                "status": "valid",
+                "social_account_id": social_account_id,
+                "platform": social_account.platform,
+                "user_info": result.get('user_info', {})
+            }
+        else:
+            # Mark account as problematic
+            social_account.is_active = False
+            social_account.error_message = result['error'][:500]
+            social_account.save(update_fields=['is_active', 'error_message'])
+            
+            logger.error(f"Social account {social_account_id} validation failed: {result['error']}")
+            return {
+                "status": "invalid",
+                "social_account_id": social_account_id,
+                "error": result['error']
+            }
         
-        # Simulate successful publication
-        import uuid
-        platform_post_id = f"{platform}_{uuid.uuid4().hex[:8]}"
-        
-        return {
-            "success": True,
-            "platform_post_id": platform_post_id,
-            "published_url": f"https://{platform}.com/posts/{platform_post_id}"
-        }
-        
+    except SocialAccount.DoesNotExist:
+        logger.error(f"Social account {social_account_id} not found")
+        return {"status": "error", "error": "Social account not found"}
+    
     except Exception as e:
-        return {"success": False, "error": str(e)}
+        logger.error(f"Error testing social account {social_account_id}: {str(e)}")
+        return {"status": "error", "error": str(e)}
+
+# Legacy function removed - now using UniversalPublisher service
 
 @shared_task(bind=True)
 def cleanup_failed_posts(self, days_old: int = 7) -> Dict[str, Any]:

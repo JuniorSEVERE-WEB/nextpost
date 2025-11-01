@@ -36,11 +36,11 @@ class Post(models.Model):
     # Identifiants
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='posts')
     social_account = models.ForeignKey(
-    "SocialAccount",
-    on_delete=models.PROTECT,   # ou CASCADE/SET_NULL selon ta logique
-    null=True, blank=True,      # <= temporaire
-    related_name="posts",
-)
+        "SocialAccount",
+        on_delete=models.PROTECT,
+        related_name="posts",
+        help_text="Compte social cible pour la publication"
+    )
 
     
     # Contenu principal

@@ -10,22 +10,33 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
+import os
 from pathlib import Path
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
+
+# Charger les variables d'environnement depuis .env si le fichier existe
+env_file = BASE_DIR / '.env'
+if env_file.exists():
+    with open(env_file, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith('#') and '=' in line:
+                key, value = line.split('=', 1)
+                os.environ.setdefault(key, value)
 
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-*(z@0@bb!$2jgg@6_uash^jvx*fz58!n6uzakp8lbc9ki503w+'
+SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-*(z@0@bb!$2jgg@6_uash^jvx*fz58!n6uzakp8lbc9ki503w+')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.environ.get('DEBUG', 'True').lower() == 'true'
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
 
 
 # Application definition
@@ -165,10 +176,8 @@ SIMPLE_JWT = {
 }
 
 # CORS settings
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-]
+cors_origins = os.environ.get('CORS_ALLOWED_ORIGINS', 'http://localhost:3000,http://127.0.0.1:3000')
+CORS_ALLOWED_ORIGINS = [origin.strip() for origin in cors_origins.split(',') if origin.strip()]
 
 CORS_ALLOW_CREDENTIALS = True
 
@@ -177,7 +186,7 @@ MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
 # Celery Configuration
-CELERY_BROKER_URL = 'redis://localhost:6379/0'
+CELERY_BROKER_URL = os.environ.get('CELERY_BROKER_URL', 'redis://localhost:6379/0')
 CELERY_RESULT_BACKEND = 'django-db'
 CELERY_CACHE_BACKEND = 'django-cache'
 CELERY_ACCEPT_CONTENT = ['json']
@@ -192,6 +201,25 @@ SPECTACULAR_SETTINGS = {
     'DESCRIPTION': 'Social media scheduling and management platform',
     'VERSION': '1.0.0',
     'SERVE_INCLUDE_SCHEMA': False,
+}
+
+# Facebook OAuth Configuration
+FACEBOOK_APP_ID = os.environ.get('FACEBOOK_APP_ID', 'your_facebook_app_id_here')
+FACEBOOK_APP_SECRET = os.environ.get('FACEBOOK_APP_SECRET', 'your_facebook_app_secret_here')
+
+# Social Media API Configuration
+SOCIAL_MEDIA_APIS = {
+    'facebook': {
+        'app_id': FACEBOOK_APP_ID,
+        'app_secret': FACEBOOK_APP_SECRET,
+        'graph_api_version': 'v18.0',
+        'permissions': [
+            'pages_manage_posts',  # Publier sur les pages
+            'pages_read_engagement',  # Lire les statistiques
+            'instagram_basic',  # Accès Instagram de base
+            'instagram_content_publish',  # Publier sur Instagram
+        ]
+    }
 }
 
 # Logging
